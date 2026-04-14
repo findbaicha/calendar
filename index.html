@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Calender</title>
+    <title>DSE 学习历程日历</title>
     <style>
         :root {
             --primary: #2c3e50;
@@ -71,11 +71,13 @@
         .day:hover { background: #f9f9f9; border-color: var(--accent); }
         .day-num { font-weight: bold; margin-bottom: 5px; }
         .event {
-            font-size: 0.8em;
+            font-size: 0.75em;
             color: var(--accent);
             overflow-wrap: break-word;
+            white-space: pre-wrap; /* 关键：识别换行符 */
+            line-height: 1.4;
         }
-        .empty { background: none; border: none; cursor: default; }
+        .empty { visibility: hidden; }
         #status {
             margin-top: 15px;
             font-size: 0.85em;
@@ -117,50 +119,50 @@
     let currentSha = null;
     let loading = true;
 
-    // --- Token 处理 ---
-    function getStoredToken() {
-        return localStorage.getItem('gh_token_temp');
-    }
+    // --- 工具函数 ---
+    const getStoredToken = () => localStorage.getItem('gh_token_temp');
+    const updateStatus = (txt) => document.getElementById('status').innerText = txt;
+    const utf8_to_b64 = (str) => btoa(unescape(encodeURIComponent(str)));
+    const b64_to_utf8 = (str) => {
+        try { return decodeURIComponent(escape(atob(str))); }
+        catch(e) { return "{}"; }
+    };
 
     function resetToken() {
         localStorage.removeItem('gh_token_temp');
-        alert("Token 已清除，请刷新页面重新输入。");
+        alert("Token 已清除，请刷新页面。");
         location.reload();
     }
 
-    // --- 编码工具 ---
-    const utf8_to_b64 = str => btoa(unescape(encodeURIComponent(str)));
-    const b64_to_utf8 = str => decodeURIComponent(escape(atob(str)));
-
-    // --- GitHub 数据交互 ---
+    // --- 数据同步 ---
     async function fetchData() {
         let token = getStoredToken();
         if (!token) {
             token = prompt("请输入 GitHub Token (ghp_...):");
             if (token) localStorage.setItem('gh_token_temp', token.trim());
-            else { updateStatus("无 Token，仅预览模式"); return; }
+            else { updateStatus("无 Token 模式"); return; }
         }
 
-        updateStatus("正在同步 GitHub 数据...");
+        updateStatus("同步 GitHub 数据中...");
         const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/contents/${CONFIG.path}`;
         
         try {
             const res = await fetch(url, {
-                headers: { 'Authorization': `token ${token}` }
+                headers: { 'Authorization': `token ${token}`, 'Cache-Control': 'no-cache' }
             });
 
             if (res.ok) {
                 const data = await res.json();
                 currentSha = data.sha;
-                events = JSON.parse(b64_to_utf8(data.content));
-                updateStatus("同步成功");
+                events = JSON.parse(b64_to_utf8(data.content) || "{}");
+                updateStatus("同步完成");
             } else if (res.status === 404) {
-                updateStatus("新数据文件准备中");
+                updateStatus("新文件准备中...");
             } else {
-                updateStatus(`错误: ${res.status}。若 Token 错误请点击重置。`);
+                updateStatus(`加载失败 (${res.status})，建议检查 Token`);
             }
         } catch (e) {
-            updateStatus("网络异常，请检查连接");
+            updateStatus("连接 GitHub 失败，请检查网络");
         }
         loading = false;
         render();
@@ -171,42 +173,44 @@
         if (!token) return;
 
         loading = true;
-        render();
-        updateStatus("正在推送更新...");
+        updateStatus("正在推送至 GitHub...");
 
         const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/contents/${CONFIG.path}`;
-        const payload = {
-            message: "Update study log",
-            content: utf8_to_b64(JSON.stringify(events, null, 2))
-        };
-        if (currentSha) payload.sha = currentSha;
-
+        
         try {
+            // 保存前获取最新 SHA，避免 409 冲突
+            const getRes = await fetch(url, { headers: { 'Authorization': `token ${token}`, 'Cache-Control': 'no-cache' } });
+            if (getRes.ok) {
+                const getData = await getRes.json();
+                currentSha = getData.sha;
+            }
+
             const res = await fetch(url, {
                 method: 'PUT',
                 headers: { 'Authorization': `token ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify({
+                    message: "Update calendar data",
+                    content: utf8_to_b64(JSON.stringify(events, null, 2)),
+                    sha: currentSha
+                })
             });
 
             if (res.ok) {
-                const result = await res.json();
-                currentSha = result.content.sha;
+                const resData = await res.json();
+                currentSha = resData.content.sha;
                 updateStatus("保存成功");
             } else {
-                updateStatus("保存失败，请检查 Token 权限");
+                updateStatus("保存失败，请检查仓库权限");
             }
         } catch (e) {
-            updateStatus("推送异常");
+            updateStatus("网络异常");
         }
         loading = false;
         render();
     }
 
-    // --- 渲染逻辑 ---
-    function updateStatus(txt) { document.getElementById('status').innerText = txt; }
-
+    // --- 界面渲染 ---
     function render() {
-        curDate.setDate(1);
         const year = curDate.getFullYear();
         const month = curDate.getMonth();
         document.getElementById('monthDisplay').innerText = `${year}年 ${month + 1}月`;
@@ -214,18 +218,18 @@
         const grid = document.getElementById('calendarGrid');
         grid.innerHTML = '';
 
-        const startDay = curDate.getDay();
-        const totalDays = new Date(year, month + 1, 0).getDate();
+        const firstDay = new Date(year, month, 1).getDay();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-        // 填充空白
-        for (let i = 0; i < startDay; i++) {
+        // 空白日期
+        for (let i = 0; i < firstDay; i++) {
             const div = document.createElement('div');
             div.className = 'day empty';
             grid.appendChild(div);
         }
 
-        // 填充日期
-        for (let d = 1; d <= totalDays; d++) {
+        // 真实日期
+        for (let d = 1; d <= daysInMonth; d++) {
             const dateKey = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
             const div = document.createElement('div');
             div.className = 'day';
@@ -237,23 +241,38 @@
                 evDiv.innerText = events[dateKey];
                 div.appendChild(evDiv);
             }
-            
+
             div.onclick = () => {
                 if (loading) return;
                 const oldNote = events[dateKey] || "";
-                const newNote = prompt(`${dateKey} 的新日程 (现有: ${oldNote}):`);
+                const newNote = prompt(`${dateKey} 的新日程:\n(取消或为空则保持不变)`);
                 
                 if (newNote !== null) {
                     if (newNote.trim()) {
-                        // 这里用换行符连接，不需要改变 JSON 数组结构也能实现视觉上的多条
-                        events[dateKey] = oldNote ? (oldNote + "\n" + newNote.trim()) : newNote.trim();
-                    } else {
-                        delete events[dateKey];
+                        // 支持追加多行
+                        events[dateKey] = oldNote ? (oldNote + "\n• " + newNote.trim()) : "• " + newNote.trim();
+                        pushData();
+                    } else if (newNote === "") {
+                        if(confirm("要清空今天的全部日程吗？")) {
+                            delete events[dateKey];
+                            pushData();
+                        }
                     }
-                    pushData();
                 }
             };
+            grid.appendChild(div);
+        }
+        document.getElementById('prevBtn').disabled = loading;
+        document.getElementById('nextBtn').disabled = loading;
+    }
 
+    function changeMonth(delta) {
+        curDate.setMonth(curDate.getMonth() + delta);
+        render();
+    }
+
+    // 自动运行
+    fetchData();
 </script>
 
 </body>
